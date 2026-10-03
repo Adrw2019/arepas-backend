@@ -43,12 +43,45 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
+function calculateHaversineKm(lat1, lng1, lat2, lng2) {
+  const toRad = deg => deg * (Math.PI / 180);
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 app.post('/api/orders', async (req, res) => {
   try {
     const order = req.body;
     if (!order || !order.id) {
       return res.status(400).json({ error: 'Invalid order data' });
     }
+
+    // Validación de cobertura para domicilios (máximo 5 km)
+    const isPickup = order.deliveryType === 'recogida';
+    if (!isPickup && order.customer && order.customer.location) {
+      const storeLat = 4.6269391;
+      const storeLng = -74.1901396;
+      const custLat = Number(order.customer.location.lat);
+      const custLng = Number(order.customer.location.lng);
+
+      if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
+        const dist = calculateHaversineKm(storeLat, storeLng, custLat, custLng);
+        if (dist > 5.001) {
+          return res.status(400).json({
+            error: 'Esta dirección está fuera de nuestra zona de domicilios. Entregamos hasta 5 km del local. Puedes elegir recoger en el local',
+            distanceKm: dist,
+            maxDeliveryDistanceKm: 5
+          });
+        }
+      }
+    }
+
     await Order.findByIdAndUpdate(order.id, { _id: order.id, data: order }, { upsert: true });
     res.json({ success: true, id: order.id });
   } catch (err) {
