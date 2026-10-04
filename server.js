@@ -62,23 +62,60 @@ app.post('/api/orders', async (req, res) => {
       return res.status(400).json({ error: 'Invalid order data' });
     }
 
-    // Validación de cobertura para domicilios (máximo 5 km)
+    // Validación de cobertura y tarifa para pedidos
     const isPickup = order.deliveryType === 'recogida';
-    if (!isPickup && order.customer && order.customer.location) {
+    const loc = order.customer && order.customer.location;
+
+    if (isPickup) {
+      order.deliveryCost = 0;
+      if (typeof order.subtotal === 'number') {
+        const tip = typeof order.tip === 'number' ? order.tip : 0;
+        order.total = order.subtotal + tip;
+      }
+    } else {
+      // Domicilio: requiere coordenadas válidas
+      if (!loc || loc.lat === null || loc.lat === undefined || loc.lng === null || loc.lng === undefined) {
+        return res.status(400).json({
+          error: 'El pedido a domicilio requiere una ubicación válida con coordenadas.',
+          code: 'LOCATION_REQUIRED'
+        });
+      }
+
       const storeLat = 4.6269391;
       const storeLng = -74.1901396;
-      const custLat = Number(order.customer.location.lat);
-      const custLng = Number(order.customer.location.lng);
+      const custLat = parseFloat(loc.lat);
+      const custLng = parseFloat(loc.lng);
 
-      if (Number.isFinite(custLat) && Number.isFinite(custLng)) {
-        const dist = calculateHaversineKm(storeLat, storeLng, custLat, custLng);
-        if (dist > 5.001) {
-          return res.status(400).json({
-            error: 'Esta dirección está fuera de nuestra zona de domicilios. Entregamos hasta 5 km del local. Puedes elegir recoger en el local',
-            distanceKm: dist,
-            maxDeliveryDistanceKm: 5
-          });
-        }
+      if (!Number.isFinite(custLat) || !Number.isFinite(custLng) || (custLat === 0 && custLng === 0)) {
+        return res.status(400).json({
+          error: 'Coordenadas de entrega inválidas.',
+          code: 'INVALID_COORDINATES'
+        });
+      }
+
+      const dist = calculateHaversineKm(storeLat, storeLng, custLat, custLng);
+      if (dist > 5.001) {
+        return res.status(400).json({
+          error: 'Esta dirección está fuera de nuestra zona de domicilios (máximo 5 km). Puedes elegir recoger en el local.',
+          distanceKm: dist,
+          maxDeliveryDistanceKm: 5
+        });
+      }
+
+      // Revalidar tarifa según distancia en línea recta
+      let expectedFee = 7000;
+      if (dist <= 2.001) {
+        expectedFee = 3000;
+      } else if (dist <= 4.001) {
+        expectedFee = 5000;
+      } else {
+        expectedFee = 7000;
+      }
+
+      order.deliveryCost = expectedFee;
+      if (typeof order.subtotal === 'number') {
+        const tip = typeof order.tip === 'number' ? order.tip : 0;
+        order.total = order.subtotal + expectedFee + tip;
       }
     }
 
@@ -128,6 +165,44 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
+// Guardar o actualizar un solo producto (Idempotente)
+app.post('/api/products', async (req, res) => {
+  try {
+    const product = req.body;
+    if (!product || !product.id) {
+      return res.status(400).json({ error: 'Datos de producto inválidos' });
+    }
+    await Product.findByIdAndUpdate(product.id, { _id: product.id, data: product }, { upsert: true });
+    res.json({ success: true, id: product.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualización o inserción masiva sin borrar otros registros (Idempotente)
+app.post('/api/products/upsert-bulk', async (req, res) => {
+  try {
+    const products = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: 'Se esperaba un arreglo de productos' });
+    }
+    const bulkOps = products.map(p => ({
+      updateOne: {
+        filter: { _id: p.id },
+        update: { $set: { _id: p.id, data: p } },
+        upsert: true
+      }
+    }));
+    if (bulkOps.length > 0) {
+      await Product.bulkWrite(bulkOps);
+    }
+    res.json({ success: true, count: products.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reemplazo masivo del catálogo completo
 app.post('/api/products/bulk', async (req, res) => {
   try {
     const products = req.body;
